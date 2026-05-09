@@ -1220,6 +1220,15 @@ static bool isIVMappedToMultipleIndices(
   return false;
 }
 
+/// Returns the tail mask of the nearest enclosing vectorized loop, if any.
+static Value getEnclosingLoopMask(VectorizationState &state) {
+  for (Operation *op = state.builder.getInsertionBlock()->getParentOp(); op;
+       op = op->getParentOp())
+    if (Value mask = state.vecLoopToMask.lookup(op))
+      return mask;
+  return Value();
+}
+
 /// Vectorizes an affine load with the vectorization strategy in 'state' by
 /// generating a 'vector.transfer_read' op with the proper permutation map
 /// inferred from the indices of the load. The new 'vector.transfer_read' is
@@ -1268,6 +1277,10 @@ static Operation *vectorizeAffineLoad(AffineLoadOp loadOp,
   auto transfer = vector::TransferReadOp::create(
       state.builder, loadOp.getLoc(), vectorType, loadOp.getMemRef(), indices,
       /*padding=*/std::nullopt, permutationMap);
+
+  // Mask OOB lanes if an enclosing vectorized loop has a tail mask.
+  if (Value mask = getEnclosingLoopMask(state))
+    transfer.getMaskMutable().assign(mask);
 
   // Register replacement for future uses in the scope.
   state.registerOpVectorReplacement(loadOp, transfer);
@@ -1324,6 +1337,12 @@ static Operation *vectorizeAffineStore(AffineStoreOp storeOp,
   auto transfer = vector::TransferWriteOp::create(
       state.builder, storeOp.getLoc(), vectorValue, storeOp.getMemRef(),
       indices, permutationMap);
+
+  // Mask OOB lanes so the trailing iteration does not clobber in-bounds
+  // memref cells outside the source loop's iteration range.
+  if (Value mask = getEnclosingLoopMask(state))
+    transfer.getMaskMutable().assign(mask);
+
   LLVM_DEBUG(dbgs() << "\n[early-vect]+++++ vectorized store: " << transfer);
 
   // Register replacement for future uses in the scope.
@@ -1469,10 +1488,22 @@ static Operation *vectorizeAffineForOp(AffineForOp forOp,
   // inserted into the vectorized loop's body.
   state.builder.setInsertionPointToStart(vecForOp.getBody());
 
-  // If this is a reduction loop then we may need to create a mask to filter out
-  // garbage in the last iteration.
-  if (isLoopVecDim && forOp.getNumIterOperands() > 0)
-    createMask(vecForOp, state);
+  // Create a tail mask for the trailing iteration. Consumed by reduction
+  // yield-time selects and by body transfer_read/transfer_write ops.
+  // 1-D vectorization only (createMask asserts). For non-reduction loops,
+  // emit a mask only when a tail is statically guaranteed (constant
+  // bounds, non-multiple trip count); otherwise preserve the existing
+  // unmasked emission.
+  if (isLoopVecDim && state.strategy->vectorSizes.size() == 1) {
+    bool isReduction = forOp.getNumIterOperands() > 0;
+    bool staticTailExists =
+        forOp.hasConstantBounds() &&
+        (forOp.getConstantUpperBound() - forOp.getConstantLowerBound()) %
+                newStep !=
+            0;
+    if (isReduction || staticTailExists)
+      createMask(vecForOp, state);
+  }
 
   return vecForOp;
 }

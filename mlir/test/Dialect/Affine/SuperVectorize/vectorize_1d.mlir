@@ -712,7 +712,8 @@ func.func @vec_non_scalar_type() {
 // CHECK:       affine.for %[[IV:.*]] = 0 to 8 step 128 {
 // CHECK-DAG:     %[[CST_VEC:.*]] = arith.constant dense<0> : vector<128xi32>
 // CHECK-DAG:     %[[C0:.*]] = arith.constant 0 : index
-// CHECK:         vector.transfer_write %[[CST_VEC]], %{{.*}}[%[[C0]], %[[IV]]] : vector<128xi32>, memref<1x8xi32>
+// CHECK:         %[[MASK:.*]] = vector.create_mask {{.*}} : vector<128xi1>
+// CHECK:         vector.transfer_write %[[CST_VEC]], %{{.*}}[%[[C0]], %[[IV]]], %[[MASK]] : vector<128xi32>, memref<1x8xi32>
 // CHECK:       }
 func.func @index_const_inside_loop(%mem: memref<1x8xi32>) {
   affine.for %arg0 = 0 to 8 {
